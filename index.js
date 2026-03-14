@@ -36,7 +36,6 @@ async function connectWhatsApp() {
 
   sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
     logger: pino({ level: 'silent' }),
   });
 
