@@ -24,6 +24,7 @@ let isProcessingQueue = false;
 let reconnectTimer = null;
 let pairingCode = null;
 let pairingPhoneNumber = null;
+let isPairingMode = false;
 
 const AUTH_DIR = path.join(process.cwd(), 'auth_session');
 const MESSAGE_DELAY = 3000;
@@ -39,6 +40,12 @@ function clearAuthSession() {
 
 function scheduleReconnect(delayMs = 5000) {
   if (reconnectTimer) return;
+  // Don't auto-reconnect while waiting for pairing code entry
+  if (isPairingMode) {
+    console.log('⏸️ Skipping auto-reconnect (pairing mode active)');
+    connectionStatus = 'waiting_for_pairing';
+    return;
+  }
   connectionStatus = 'reconnecting';
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -47,8 +54,23 @@ function scheduleReconnect(delayMs = 5000) {
 }
 
 async function connectWhatsApp(phoneForPairing) {
+  // Cancel any pending reconnect
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   connectionStatus = 'connecting';
-  pairingCode = null;
+  // Only clear pairing code if NOT starting a new pairing request
+  if (!phoneForPairing) {
+    // Don't clear if we're in pairing mode - keep showing the code
+    if (!isPairingMode) {
+      pairingCode = null;
+    }
+  } else {
+    pairingCode = null;
+    isPairingMode = true;
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
@@ -69,12 +91,13 @@ async function connectWhatsApp(phoneForPairing) {
       if (reason === DisconnectReason.loggedOut) {
         console.log('🔐 Session logged out. Resetting auth...');
         pairingCode = null;
+        isPairingMode = false;
         clearAuthSession();
         scheduleReconnect(2000);
         return;
       }
 
-      console.log(`🔄 Reconnecting... (reason: ${lastDisconnectReason})`);
+      console.log(`🔄 Connection closed (reason: ${lastDisconnectReason}, pairingMode: ${isPairingMode})`);
       scheduleReconnect(5000);
     }
 
@@ -87,6 +110,7 @@ async function connectWhatsApp(phoneForPairing) {
       lastDisconnectReason = null;
       pairingCode = null;
       pairingPhoneNumber = null;
+      isPairingMode = false;
       console.log('✅ WhatsApp connected!');
       processQueue();
     }
@@ -95,18 +119,20 @@ async function connectWhatsApp(phoneForPairing) {
   // Request pairing code if phone number provided and not already registered
   if (phoneForPairing && !state.creds.registered) {
     try {
-      // Wait a bit for the socket to initialize
+      // Wait for the socket to initialize
       await new Promise(r => setTimeout(r, 3000));
       const cleanPhone = phoneForPairing.replace(/[^0-9]/g, '');
       const code = await sock.requestPairingCode(cleanPhone);
       pairingCode = code;
       pairingPhoneNumber = cleanPhone;
       connectionStatus = 'pairing_code_ready';
+      isPairingMode = true;
       console.log(`📱 Pairing code generated for ${cleanPhone}: ${code}`);
     } catch (err) {
       console.error('❌ Failed to generate pairing code:', err.message);
       pairingCode = null;
       connectionStatus = 'pairing_failed';
+      isPairingMode = false;
       lastDisconnectReason = err.message;
     }
   }
@@ -157,6 +183,7 @@ app.get('/status', (req, res) => {
     status: connectionStatus,
     pairingCode: pairingCode,
     pairingPhone: pairingPhoneNumber,
+    isPairingMode: isPairingMode,
     queueLength: messageQueue.length,
     lastDisconnectReason,
   });
@@ -177,6 +204,7 @@ app.post('/request-pairing-code', async (req, res) => {
     // Reset session and reconnect with pairing
     clearAuthSession();
     pairingCode = null;
+    isPairingMode = false;
     connectionStatus = 'connecting';
     
     if (reconnectTimer) {
@@ -186,9 +214,9 @@ app.post('/request-pairing-code', async (req, res) => {
 
     await connectWhatsApp(phone);
     
-    // Wait up to 15 seconds for pairing code
+    // Wait up to 20 seconds for pairing code
     let attempts = 0;
-    while (!pairingCode && attempts < 30 && connectionStatus !== 'connected') {
+    while (!pairingCode && attempts < 40 && connectionStatus !== 'connected') {
       await new Promise(r => setTimeout(r, 500));
       attempts++;
     }
@@ -212,6 +240,7 @@ app.post('/reset-session', (req, res) => {
   clearAuthSession();
   pairingCode = null;
   pairingPhoneNumber = null;
+  isPairingMode = false;
   connectionStatus = 'reconnecting';
   scheduleReconnect(1000);
   res.json({ success: true, message: 'Session reset.' });
