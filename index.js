@@ -29,6 +29,27 @@ let isPairingMode = false;
 const AUTH_DIR = path.join(process.cwd(), 'auth_session');
 const MESSAGE_DELAY = 3000;
 
+function toLatinDigits(value = '') {
+  return value
+    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[۰-۹]/g, d => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
+}
+
+function normalizePhoneNumber(value = '') {
+  let normalized = toLatinDigits(String(value)).trim();
+  normalized = normalized.replace(/\s+/g, '');
+  normalized = normalized.replace(/^\+/, '');
+  normalized = normalized.replace(/^00/, '');
+  normalized = normalized.replace(/\D/g, '');
+
+  // Convenience for Egypt local format: 01XXXXXXXXX -> 20XXXXXXXXXX
+  if (/^01\d{9}$/.test(normalized)) {
+    normalized = `20${normalized.slice(1)}`;
+  }
+
+  return normalized;
+}
+
 function clearAuthSession() {
   try {
     fs.rmSync(AUTH_DIR, { recursive: true, force: true });
@@ -120,14 +141,19 @@ async function connectWhatsApp(phoneForPairing) {
   if (phoneForPairing && !state.creds.registered) {
     try {
       // Wait for the socket to initialize
-      await new Promise(r => setTimeout(r, 3000));
-      const cleanPhone = phoneForPairing.replace(/[^0-9]/g, '');
-      const code = await sock.requestPairingCode(cleanPhone);
+      await new Promise(r => setTimeout(r, 4000));
+
+      const normalizedPhone = normalizePhoneNumber(phoneForPairing);
+      if (!/^\d{10,15}$/.test(normalizedPhone)) {
+        throw new Error('Invalid phone format. Use international format like 2010XXXXXXXX');
+      }
+
+      const code = await sock.requestPairingCode(normalizedPhone);
       pairingCode = code;
-      pairingPhoneNumber = cleanPhone;
+      pairingPhoneNumber = normalizedPhone;
       connectionStatus = 'pairing_code_ready';
       isPairingMode = true;
-      console.log(`📱 Pairing code generated for ${cleanPhone}: ${code}`);
+      console.log(`📱 Pairing code generated for ${normalizedPhone}: ${code}`);
     } catch (err) {
       console.error('❌ Failed to generate pairing code:', err.message);
       pairingCode = null;
@@ -192,8 +218,10 @@ app.get('/status', (req, res) => {
 // Request pairing code with phone number
 app.post('/request-pairing-code', async (req, res) => {
   const { phone } = req.body;
-  if (!phone) {
-    return res.status(400).json({ success: false, error: 'phone number required' });
+  const normalizedPhone = normalizePhoneNumber(phone);
+
+  if (!normalizedPhone || !/^\d{10,15}$/.test(normalizedPhone)) {
+    return res.status(400).json({ success: false, error: 'Invalid phone number. Use international format like 2010XXXXXXXX' });
   }
 
   if (connectionStatus === 'connected') {
@@ -212,7 +240,7 @@ app.post('/request-pairing-code', async (req, res) => {
       reconnectTimer = null;
     }
 
-    await connectWhatsApp(phone);
+    await connectWhatsApp(normalizedPhone);
     
     // Wait up to 20 seconds for pairing code
     let attempts = 0;
